@@ -1,293 +1,311 @@
-/**
- * 
- */
 package com.zhuzhong.idleaf.support;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.Date;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.FutureTask;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowCallbackHandler;
+import javax.sql.DataSource;
 
 import com.zhuzhong.idleaf.IdLeafService;
+import org.apache.log4j.Logger;
 
 /**
- * @author sunff
- * 
+ *
+ * @author hzwumsh
+ * ¥¥Ω® ±º‰ 2018-04-02 15:10
+ *
  */
-public class MysqlIdLeafServiceImpl implements IdLeafService {
+public class MysqlIdLeafServiceImpl implements IdLeafService
+{
+	private static final Logger LOGGER = Logger.getLogger(MysqlIdLeafServiceImpl.class);
 
-	private static Logger log = LoggerFactory.getLogger(MysqlIdLeafServiceImpl.class);
+	private volatile Future<Boolean> asynLoadSegmentTask = null;
+	private volatile IdSegment[] segment = new IdSegment[2]; // ’‚¡Ω∂Œ”√¿¥¥Ê¥¢√ø¥Œ¿≠…˝÷Æ∫Ûµƒ◊Ó¥Û÷µ
+	// “˝”√≤ªª·–ﬁ∏ƒ£¨À˘“‘≤ª–Ë“™…Ë÷√Œ™volatile
+	private AtomicBoolean switchFlag = new AtomicBoolean(true);
+	private ReentrantLock lock = new ReentrantLock();
+	// ¥¥Ω®œﬂ≥Ã≥ÿ
+	private ExecutorService taskExecutor;
+	private DataSource dataSource;
+	private BaseDao baseDao;
+	private String bizTag;
+	private boolean asynLoadingSegment;
 
-	// ÂàõÂª∫Á∫øÁ®ãÊ±†
-	private ExecutorService taskExecutor;// = Executors.newSingleThreadExecutor();
-
-	public void setTaskExecutor(ExecutorService taskExecutor) {
+	public void setTaskExecutor(ExecutorService taskExecutor)
+	{
 		this.taskExecutor = taskExecutor;
 	}
 
-	public MysqlIdLeafServiceImpl() {
-
-	}
-
-	private volatile IdSegment[] segment = new IdSegment[2]; // Ëøô‰∏§ÊÆµÁî®Êù•Â≠òÂÇ®ÊØèÊ¨°ÊãâÂçá‰πãÂêéÁöÑÊúÄÂ§ßÂÄº
-	private volatile boolean sw;
-	private AtomicLong currentId;
-	private static ReentrantLock lock = new ReentrantLock();
-
-	// private static Condition swContion = lock.newCondition();
-
-	public void init() {
-		if (this.bizTag == null) {
+	public void init()
+	{
+		if (this.bizTag == null)
+		{
 			throw new RuntimeException("bizTag must be not null");
 		}
-		if (this.jdbcTemplate == null) {
+		if (this.dataSource == null)
+		{
 			throw new RuntimeException("jdbcTemplate must be not null");
 		}
-
-		if (taskExecutor == null) {
+		baseDao = new BaseDao(this.dataSource);
+		if (taskExecutor == null)
+		{
 			taskExecutor = Executors.newSingleThreadExecutor();
 		}
 		segment[0] = doUpdateNextSegment(bizTag);
-		// segment[1] = doUpdateNextSegment(bizTag);
-		setSw(false);
-		currentId = new AtomicLong(segment[index()].getMinId()); // ÂàùÂßãid
-		log.info("init run success...");
+		setSwitchFlag(false);
+		LOGGER.info(this.bizTag + " init run success...");
 	}
 
-	FutureTask<Boolean> asynLoadSegmentTask = null;
-
-	private Long asynGetId() {
-
-		if (segment[index()].getMiddleId().equals(currentId.longValue())
-				|| segment[index()].getMaxId().equals(currentId.longValue())) {
-			try {
+	private Long asynGetId()
+	{
+		IdSegment currentIdSegment = segment[index()];
+		long nextId = currentIdSegment.getCurrentId().incrementAndGet();
+		//  π”√50%µƒ ±∫Ú¥•∑¢ªÒ»°≤Ÿ◊˜
+		if (currentIdSegment.getMiddleId() <= nextId
+				&& (asynLoadSegmentTask == null || currentIdSegment.getMaxId() <= nextId))
+		{
+			try
+			{
 				lock.lock();
-				if (segment[index()].getMiddleId().equals(currentId.longValue())) {
-					// Ââç‰∏ÄÊÆµ‰ΩøÁî®‰∫Ü50%
-
-					asynLoadSegmentTask = new FutureTask<>(new Callable<Boolean>() {
+				if (currentIdSegment.getMiddleId() <= nextId
+						&& currentIdSegment.getMinId() == segment[index()].getMinId() && asynLoadSegmentTask == null)
+				{
+					asynLoadSegmentTask = taskExecutor.submit(new Callable<Boolean>() {
 
 						@Override
-						public Boolean call() throws Exception {
-							final int currentIndex = reIndex();
-							segment[currentIndex] = doUpdateNextSegment(bizTag);
-							return true;
+						public Boolean call() throws Exception
+						{
+							try
+							{
+								final int reCurrentIndex = reIndex();
+								segment[reCurrentIndex] = doUpdateNextSegment(bizTag);
+								return true;
+							}
+							catch (Throwable e)
+							{
+								LOGGER.fatal("“Ï≤ΩªÒ»°÷˜º¸–Ú¡–“Ï≥£,bizTag=" + bizTag + ", errorMsg=" + e.getMessage(), e);
+								return false;
+							}
 						}
 
 					});
-					taskExecutor.submit(asynLoadSegmentTask);
 				}
-				if (segment[index()].getMaxId().equals(currentId.longValue())) {
 
-					/*
-					 * final int currentIndex = index(); segment[currentIndex] =
-					 * doUpdateNextSegment(bizTag);
-					 */
-					boolean loadingResult;
-					try {
-						loadingResult = asynLoadSegmentTask.get();
-						if (loadingResult) {
-							setSw(!isSw()); // ÂàáÊç¢
-							currentId = new AtomicLong(segment[index()].getMinId()); // ËøõË°åÂàáÊç¢
+				if (currentIdSegment.getMaxId() <= nextId && segment[index()].getMaxId() == currentIdSegment.getMaxId())
+				{
+					try
+					{
+						boolean loadingResult = asynLoadSegmentTask.get(500, TimeUnit.MILLISECONDS);
+						if (!loadingResult)
+						{
+							throw new RuntimeException("“Ï≤Ωº”‘ÿ÷˜º¸–Ú¡–∑«≥…π¶");
 						}
-					} catch (InterruptedException e) {
-
-						e.printStackTrace();
-						// Âº∫Âà∂ÂêåÊ≠•ÂàáÊç¢
-						final int currentIndex = reIndex();
-						segment[currentIndex] = doUpdateNextSegment(bizTag);
-						setSw(!isSw()); // ÂàáÊç¢
-						currentId = new AtomicLong(segment[index()].getMinId()); // ËøõË°åÂàáÊç¢
-					} catch (ExecutionException e) {
-
-						e.printStackTrace();
-						// Âº∫Âà∂ÂêåÊ≠•ÂàáÊç¢
-						final int currentIndex = reIndex();
-						segment[currentIndex] = doUpdateNextSegment(bizTag);
-						setSw(!isSw()); // ÂàáÊç¢
-						currentId = new AtomicLong(segment[index()].getMinId()); // ËøõË°åÂàáÊç¢
+						setSwitchFlag(!isSwitchFlag()); // «–ªª
 					}
-
+					catch (Throwable e)
+					{
+						LOGGER.error("¥”œﬂ≥Ã≥ÿªÒ»°÷˜º¸–Ú¡–“Ï≥£,bizTag=" + bizTag + ", errorMsg=" + e.getMessage(), e);
+						// «ø÷∆Õ¨≤Ω«–ªª
+						forceUpdateSegment();
+						setSwitchFlag(!isSwitchFlag()); // «–ªª
+					}
+					finally
+					{
+						asynLoadSegmentTask = null;
+					}
 				}
 
-			} finally {
+				if (nextId > currentIdSegment.getMaxId())
+				{
+					currentIdSegment = segment[index()];
+					nextId = currentIdSegment.getCurrentId().incrementAndGet();
+				}
+
+				if (nextId > currentIdSegment.getMaxId())
+				{
+					// «ø÷∆Õ¨≤Ω«–ªª
+					forceUpdateSegment();
+					setSwitchFlag(!isSwitchFlag()); // «–ªª
+					currentIdSegment = segment[index()];
+					nextId = currentIdSegment.getCurrentId().incrementAndGet();
+				}
+			}
+			finally
+			{
 				lock.unlock();
 			}
 		}
 
-		return currentId.incrementAndGet();
-
-	}
-
-	private int reIndex() {
-		if (isSw()) {
-			return 0;
-		} else {
-			return 1;
+		if (nextId > currentIdSegment.getMaxId())
+		{
+			throw new RuntimeException("ªÒ»°œ¬“ª∏ˆ–Ú¡–≥¨≥ˆµ±«∞–Ú¡–∑∂Œß");
 		}
+		return nextId;
 	}
 
-	private Long synGetId() {
-		if (segment[index()].getMiddleId().equals(currentId.longValue())
-				|| segment[index()].getMaxId().equals(currentId.longValue())) {
-			try {
+	private Long synGetId()
+	{
+		IdSegment currentIdSegment = segment[index()];
+		long nextId = currentIdSegment.getCurrentId().incrementAndGet();
+		if (currentIdSegment.getMiddleId() <= nextId)
+		{
+			try
+			{
 				lock.lock();
 
-				if (segment[index()].getMiddleId().equals(currentId.longValue())) {
-					// ‰ΩøÁî®50%ËøõË°åÂä†ËΩΩ
+				if (currentIdSegment.getMiddleId() <= nextId
+						&& segment[index()].getMinId() == currentIdSegment.getMinId()
+						&& (segment[reIndex()] == null || segment[reIndex()].getMinId() < currentIdSegment.getMinId()))
+				{
+					//  π”√50%Ω¯––º”‘ÿ
 					final int currentIndex = reIndex();
 					segment[currentIndex] = doUpdateNextSegment(bizTag);
 				}
 
-				if (segment[index()].getMaxId().equals(currentId.longValue())) {
-					setSw(!isSw()); // ÂàáÊç¢
-					currentId = new AtomicLong(segment[index()].getMinId()); // ËøõË°åÂàáÊç¢
-
+				if (currentIdSegment.getMaxId() <= nextId && segment[index()].getMinId() == currentIdSegment.getMinId())
+				{
+					// œ¬“ª∂ŒªπŒ™º”‘ÿ≥…π¶
+					if (segment[reIndex()] == null || segment[reIndex()].getMinId() < currentIdSegment.getMinId())
+					{
+						forceUpdateSegment();
+					}
+					setSwitchFlag(!isSwitchFlag()); // «–ªª
 				}
 
-			} finally {
+				if (nextId > currentIdSegment.getMaxId())
+				{
+					currentIdSegment = segment[index()];
+					nextId = currentIdSegment.getCurrentId().incrementAndGet();
+				}
+
+				if (nextId > currentIdSegment.getMaxId())
+				{
+					// «ø÷∆Õ¨≤Ω«–ªª
+					forceUpdateSegment();
+					setSwitchFlag(!isSwitchFlag()); // «–ªª
+					currentIdSegment = segment[index()];
+					nextId = currentIdSegment.getCurrentId().incrementAndGet();
+				}
+			}
+			finally
+			{
 				lock.unlock();
 			}
 		}
 
-		return currentId.incrementAndGet();
+		if (nextId > currentIdSegment.getMaxId())
+		{
+			throw new RuntimeException("ªÒ»°œ¬“ª∏ˆ–Ú¡–≥¨≥ˆµ±«∞–Ú¡–∑∂Œß");
+		}
+
+		return nextId;
+	}
+
+	// just for monitor
+	private void forceUpdateSegment()
+	{
+		// «ø÷∆Õ¨≤Ω«–ªª
+		final int reCurrentIndex = reIndex();
+		segment[reCurrentIndex] = doUpdateNextSegment(bizTag);
+	}
+
+	private int reIndex()
+	{
+		if (isSwitchFlag())
+		{
+			return 0;
+		}
+		else
+		{
+			return 1;
+		}
 	}
 
 	@Override
-	public Long getId() {
-		if (asynLoadingSegment) {
+	public Long getId()
+	{
+		if (asynLoadingSegment)
+		{
 			return asynGetId();
-		} else {
+		}
+		else
+		{
 			return synGetId();
 		}
 	}
 
-	private boolean isSw() {
-		return sw;
+	private boolean isSwitchFlag()
+	{
+		return switchFlag.get();
 	}
 
-	private void setSw(boolean sw) {
-		this.sw = sw;
+	private void setSwitchFlag(boolean switchFlag)
+	{
+		for (int index = 0; index < 3; index++)
+		{
+			if (this.switchFlag.compareAndSet(!switchFlag, switchFlag))
+			{
+				return;
+			}
+		}
+		throw new RuntimeException("–ﬁ∏ƒ«–ªª±Í÷æ ß∞‹,«ÎºÏ≤È,bizTag=" + bizTag);
 	}
 
-	private int index() {
-		if (isSw()) {
+	private int index()
+	{
+		if (isSwitchFlag())
+		{
 			return 1;
-		} else {
+		}
+		else
+		{
 			return 0;
 		}
 	}
 
-	private IdSegment doUpdateNextSegment(String bizTag) {
-		try {
+	private IdSegment doUpdateNextSegment(String bizTag)
+	{
+		try
+		{
 			return updateId(bizTag);
-		} catch (Exception e) {
-			e.printStackTrace();
 		}
-		return null;
-	}
-
-	private IdSegment updateId(String bizTag) throws Exception {
-		/*
-		 * String querySql
-		 * =String.format("select %s as  p_step , %s as  max_id  from %s where %s=?" ,
-		 * stepField, maxIdField,tableName,this.bizTagField);
-		 */
-		String querySql = "select p_step ,max_id ,last_update_time,current_update_time from id_segment where biz_tag=?";
-		String updateSql = "update id_segment set max_id=?,last_update_time=?,current_update_time=now() where biz_tag=? and max_id=?";
-		/*
-		 * String updateSql=String.format("update %s set %s=? where %s=? and %s=?",
-		 * tableName,maxIdField,bizTagField,maxIdField);
-		 */
-		final IdSegment currentSegment = new IdSegment();
-		this.jdbcTemplate.query(querySql, new String[] { bizTag }, new RowCallbackHandler() {
-
-			@Override
-			public void processRow(ResultSet rs) throws SQLException {
-
-				Long step = null;
-				Long currentMaxId = null;
-				step = rs.getLong("p_step");
-				currentMaxId = rs.getLong("max_id");
-
-				Date lastUpdateTime = new Date();
-				if (rs.getTimestamp("last_update_time") != null) {
-					lastUpdateTime = (java.util.Date) rs.getTimestamp("last_update_time");
-				}
-
-				Date currentUpdateTime = new Date();
-				if (rs.getTimestamp("current_update_time") != null) {
-					currentUpdateTime = (java.util.Date) rs.getTimestamp("current_update_time");
-				}
-
-				currentSegment.setStep(step);
-				currentSegment.setMaxId(currentMaxId);
-				currentSegment.setLastUpdateTime(lastUpdateTime);
-				currentSegment.setCurrentUpdateTime(currentUpdateTime);
-
+		catch (Exception e)
+		{
+			LOGGER.error("µ⁄“ª¥ŒªÒ»°÷˜º¸–Ú¡–“Ï≥£,bizTag=" + bizTag + ", errorMsg=" + e.getMessage(), e);
+			try
+			{
+				return updateId(bizTag);
 			}
-		});
-		Long newMaxId = currentSegment.getMaxId() + currentSegment.getStep();
-		int row = this.jdbcTemplate.update(updateSql,
-				new Object[] { newMaxId, currentSegment.getCurrentUpdateTime(), bizTag, currentSegment.getMaxId() });
-		if (row == 1) {
-			IdSegment newSegment = new IdSegment();
-			newSegment.setStep(currentSegment.getStep());
-			newSegment.setMaxId(newMaxId);
-
-			return newSegment;
-		} else {
-			return updateId(bizTag); // ÈÄíÂΩíÔºåÁõ¥Ëá≥Êõ¥Êñ∞ÊàêÂäü
+			catch (Exception e1)
+			{
+				LOGGER.error("µ⁄∂˛¥ŒªÒ»°÷˜º¸–Ú¡–“Ï≥£,bizTag=" + bizTag + ", errorMsg=" + e1.getMessage(), e1);
+				throw e1;
+			}
 		}
-
 	}
 
-	private JdbcTemplate jdbcTemplate;
-
-	public void setJdbcTemplate(JdbcTemplate jdbcTemplate) {
-		this.jdbcTemplate = jdbcTemplate;
+	private IdSegment updateId(String bizTag)
+	{
+		IdSegment nextIdSegment = baseDao.updateAndGetNextIdSegment(bizTag);
+		if (nextIdSegment != null)
+		{
+			return nextIdSegment;
+		}
+		throw new RuntimeException("ªÒ»°÷˜º¸–Ú¡– ß∞‹,bizTag=" + bizTag);
 	}
 
-	private String bizTag;
+	public void setDataSource(DataSource dataSource)
+	{
+		this.dataSource = dataSource;
+	}
 
-	public void setBizTag(String bizTag) {
+	public void setBizTag(String bizTag)
+	{
 		this.bizTag = bizTag;
 	}
 
-	private boolean asynLoadingSegment;
-
-	public void setAsynLoadingSegment(boolean asynLoadingSegment) {
+	public void setAsynLoadingSegment(boolean asynLoadingSegment)
+	{
 		this.asynLoadingSegment = asynLoadingSegment;
 	}
-
-	/*
-	 * private String stepField; private String maxIdField; private String
-	 * tableName;
-	 * 
-	 * private String bizTagField;
-	 */
-
-	/*
-	 * public void setStepField(String stepField) { this.stepField = stepField; }
-	 * 
-	 * public void setMaxIdField(String maxIdField) { this.maxIdField = maxIdField;
-	 * }
-	 * 
-	 * public void setTableName(String tableName) { this.tableName = tableName; }
-	 * 
-	 * public void setBizTagField(String bizTagField) { this.bizTagField =
-	 * bizTagField; }
-	 */
-
 }

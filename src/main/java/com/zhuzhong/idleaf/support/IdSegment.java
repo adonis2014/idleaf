@@ -1,76 +1,62 @@
 package com.zhuzhong.idleaf.support;
 
-import java.util.Date;
+import java.util.concurrent.atomic.AtomicLong;
 
-public class IdSegment {
-    private Long minId;
-    private Long maxId;
+/**
+ *
+ * @author hzwumsh
+ * 创建时间 2018-04-02 15:11
+ *
+ */
+public class IdSegment
+{
+	private String bizTag;
+	private long minId;
+	private long maxId;
 
-    private Long step;
+	private long step;
 
-    private Long middleId;
+	private long middleId;
 
-    private Date lastUpdateTime;
-    private Date currentUpdateTime;
+	private AtomicLong currentId;
 
-    public IdSegment() {
+	public IdSegment(String bizTag, long maxId, long step)
+	{
+		this.bizTag = bizTag;
+		this.maxId = maxId;
+		this.step = step;
+		this.middleId = this.maxId - (long) Math.round(step / 2);
+		this.minId = this.maxId - this.step;
+		this.currentId = new AtomicLong(this.minId);
+	}
 
-    }
+	public long getMiddleId()
+	{
+		return middleId;
+	}
 
-    public Date getLastUpdateTime() {
-        return lastUpdateTime;
-    }
+	public long getMinId()
+	{
+		return minId;
+	}
 
-    public void setLastUpdateTime(Date lastUpdateTime) {
-        this.lastUpdateTime = lastUpdateTime;
-    }
+	public long getMaxId()
+	{
+		return maxId;
+	}
 
-    public Date getCurrentUpdateTime() {
-        return currentUpdateTime;
-    }
+	public long getStep()
+	{
+		return step;
+	}
 
-    public void setCurrentUpdateTime(Date currentUpdateTime) {
-        this.currentUpdateTime = currentUpdateTime;
-    }
+	public String getBizTag()
+	{
+		return bizTag;
+	}
 
-    public Long getMiddleId() {
-
-        if (this.middleId == null) {
-            this.middleId = this.maxId - (long) Math.round(step / 2);
-        }
-        return middleId;
-    }
-
-    public Long getMinId() {
-        if (this.minId == null) {
-            if (this.maxId != null && this.step != null) {
-                this.minId = this.maxId - this.step;
-            } else {
-                throw new RuntimeException("maxid or step is null");
-            }
-        }
-
-        return minId;
-    }
-
-    /*
-     * public void setMinId(Long minId) { this.minId = minId; }
-     */
-
-    public Long getMaxId() {
-        return maxId;
-    }
-
-    public void setMaxId(Long maxId) {
-        this.maxId = maxId;
-    }
-
-    public Long getStep() {
-        return step;
-    }
-
-    public void setStep(Long step) {
-        this.step = step;
-    }
-
+	public AtomicLong getCurrentId()
+	{
+		return currentId;
+	}
 }
